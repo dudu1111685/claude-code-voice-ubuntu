@@ -125,6 +125,181 @@ func transcribeApple(_ pcm: Data, locale: String, completion: @escaping (String)
     }
 }
 
+// MARK: - ivrit.ai STT (Hebrew — cloud via RunPod or local via faster-whisper)
+
+enum IvritEngine {
+    case local(device: String, computeType: String, model: String)
+    case runpod(apiKey: String, endpointId: String, model: String)
+}
+
+func readIvritConfig() -> IvritEngine? {
+    let path = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/settings.json")
+    guard let data = try? Data(contentsOf: path),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let cfg = json["ivritAi"] as? [String: Any] else { return nil }
+
+    let engine = (cfg["engine"] as? String ?? "runpod").lowercased()
+
+    if engine == "local" {
+        let device = (cfg["device"] as? String) ?? "cpu"
+        let computeType = (cfg["computeType"] as? String) ?? (device.contains("cuda") || device == "mps" ? "float16" : "float32")
+        let model = (cfg["model"] as? String) ?? "ivrit-ai/faster-whisper-v2-d4"
+        return .local(device: device, computeType: computeType, model: model)
+    }
+
+    // runpod
+    guard let apiKey = cfg["apiKey"] as? String, !apiKey.isEmpty,
+          let endpointId = cfg["endpointId"] as? String, !endpointId.isEmpty else { return nil }
+    let model = (cfg["model"] as? String) ?? "ivrit-ai/whisper-large-v3-turbo-ct2"
+    return .runpod(apiKey: apiKey, endpointId: endpointId, model: model)
+}
+
+func isHebrew(_ raw: String) -> Bool {
+    return langCode(raw) == "he"
+}
+
+func ivritEngineLabel(_ engine: IvritEngine) -> String {
+    switch engine {
+    case .local(let device, _, _): return "local/\(device)"
+    case .runpod: return "RunPod"
+    }
+}
+
+func transcribeIvrit(_ pcm: Data, completion: @escaping (String) -> Void) {
+    guard !pcm.isEmpty else { return completion("") }
+    let dur = String(format: "%.1f", Double(pcm.count) / 32000.0)
+
+    guard let engine = readIvritConfig() else {
+        print("[voice] ivrit.ai not configured — falling back to Apple STT")
+        transcribeApple(pcm, locale: "he-IL", completion: completion)
+        return
+    }
+
+    print("[voice] \(dur)s → ivrit.ai STT (\(ivritEngineLabel(engine)))")
+
+    switch engine {
+    case .local(let device, let computeType, let model):
+        transcribeIvritLocal(pcm, device: device, computeType: computeType, model: model, completion: completion)
+    case .runpod(let apiKey, let endpointId, let model):
+        transcribeIvritRunpod(pcm, apiKey: apiKey, endpointId: endpointId, model: model, completion: completion)
+    }
+}
+
+func transcribeIvritLocal(_ pcm: Data, device: String, computeType: String, model: String, completion: @escaping (String) -> Void) {
+    let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("ivrit-\(ProcessInfo.processInfo.globallyUniqueString).wav")
+    try? createWav(pcm).write(to: tmp)
+
+    // Find the helper script next to this binary
+    let binaryPath = CommandLine.arguments[0]
+    let binaryDir = (binaryPath as NSString).deletingLastPathComponent
+    // The helper is at ../../scripts/transcribe_ivrit_local.py relative to the binary inside .app
+    let scriptCandidates = [
+        (binaryDir as NSString).appendingPathComponent("../../../scripts/transcribe_ivrit_local.py"),
+        (binaryDir as NSString).appendingPathComponent("../../transcribe_ivrit_local.py"),
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share/claude-code-voice/scripts/transcribe_ivrit_local.py").path,
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share/claude-code-voice/transcribe_ivrit_local.py").path,
+    ]
+
+    var scriptPath: String?
+    for candidate in scriptCandidates {
+        let resolved = (candidate as NSString).standardizingPath
+        if FileManager.default.fileExists(atPath: resolved) {
+            scriptPath = resolved
+            break
+        }
+    }
+
+    guard let script = scriptPath else {
+        print("[voice] transcribe_ivrit_local.py not found — falling back to Apple STT")
+        try? FileManager.default.removeItem(at: tmp)
+        transcribeApple(pcm, locale: "he-IL", completion: completion)
+        return
+    }
+
+    DispatchQueue.global(qos: .userInitiated).async {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        proc.arguments = [script, tmp.path, device, computeType, model]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+        } catch {
+            print("[voice] ivrit.ai local error: \(error) — falling back to Apple STT")
+            try? FileManager.default.removeItem(at: tmp)
+            DispatchQueue.main.async { transcribeApple(pcm, locale: "he-IL", completion: completion) }
+            return
+        }
+
+        try? FileManager.default.removeItem(at: tmp)
+
+        let outData = pipe.fileHandleForReading.readDataToEndOfFile()
+        let text = (String(data: outData, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if proc.terminationStatus != 0 || text.hasPrefix("ERROR:") {
+            print("[voice] ivrit.ai local failed — falling back to Apple STT")
+            DispatchQueue.main.async { transcribeApple(pcm, locale: "he-IL", completion: completion) }
+            return
+        }
+
+        if !text.isEmpty { print("[voice] \"\(text)\"") }
+        DispatchQueue.main.async { completion(text) }
+    }
+}
+
+func transcribeIvritRunpod(_ pcm: Data, apiKey: String, endpointId: String, model: String, completion: @escaping (String) -> Void) {
+    let wav = createWav(pcm)
+    let audioB64 = wav.base64EncodedString()
+
+    let url = URL(string: "https://api.runpod.ai/v2/\(endpointId)/runsync")!
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.timeoutInterval = 60
+
+    let body: [String: Any] = [
+        "input": [
+            "type": "blob",
+            "data": audioB64,
+            "language": "he",
+            "model": model
+        ]
+    ]
+    request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+    URLSession.shared.dataTask(with: request) { data, response, error in
+        if let error = error {
+            print("[voice] ivrit.ai RunPod error: \(error.localizedDescription) — falling back to Apple STT")
+            transcribeApple(pcm, locale: "he-IL", completion: completion)
+            return
+        }
+        guard let data = data,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            print("[voice] ivrit.ai RunPod: invalid response — falling back to Apple STT")
+            transcribeApple(pcm, locale: "he-IL", completion: completion)
+            return
+        }
+
+        // RunPod response: {"output": {"text": "..."}} or {"output": {"segments": [...]}}
+        var text = ""
+        if let output = json["output"] as? [String: Any] {
+            if let t = output["text"] as? String {
+                text = t.trimmingCharacters(in: .whitespacesAndNewlines)
+            } else if let segments = output["segments"] as? [[String: Any]] {
+                text = segments.compactMap { $0["text"] as? String }.joined(separator: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
+        if !text.isEmpty { print("[voice] \"\(text)\"") }
+        completion(text)
+    }.resume()
+}
+
 // MARK: - WebSocket helpers
 
 func sendJSON(_ conn: NWConnection, _ dict: [String: String]) {
@@ -201,8 +376,12 @@ class LocalSession {
     var chunks: [Data] = []
     var closed = false
     let locale: String
+    let useIvrit: Bool
 
-    init(locale: String) { self.locale = locale }
+    init(locale: String, useIvrit: Bool = false) {
+        self.locale = locale
+        self.useIvrit = useIvrit
+    }
 
     func receive(_ conn: NWConnection) {
         conn.receiveMessage { [self] data, ctx, _, error in
@@ -226,7 +405,10 @@ class LocalSession {
             sendJSON(conn, ["type": "TranscriptText", "data": ""])
             let pcm = chunks.reduce(Data()) { $0 + $1 }
             chunks = []
-            transcribeApple(pcm, locale: locale) { text in
+            let transcriber: (Data, @escaping (String) -> Void) -> Void = useIvrit
+                ? { data, cb in transcribeIvrit(data, completion: cb) }
+                : { data, cb in transcribeApple(data, locale: self.locale, completion: cb) }
+            transcriber(pcm) { text in
                 if !text.isEmpty { sendJSON(conn, ["type": "TranscriptText", "data": text]) }
                 sendJSON(conn, ["type": "TranscriptEndpoint"])
             }
@@ -256,6 +438,11 @@ func startServer() {
             print("[voice] Connected (\(code) → Anthropic)")
             let session = ProxySession(conn, lang: code, token: token)
             activeSessions[ObjectIdentifier(session)] = session
+        } else if isHebrew(raw) && readIvritConfig() != nil {
+            print("[voice] Connected (he → ivrit.ai STT)")
+            let session = LocalSession(locale: "he-IL", useIvrit: true)
+            activeSessions[ObjectIdentifier(session)] = session
+            session.receive(conn)
         } else {
             let locale = appleLocale(raw)
             print("[voice] Connected (\(locale) → Apple STT)")
@@ -271,7 +458,12 @@ func startServer() {
     }
     listener.start(queue: .main)
     print("[voice] Voice server on ws://127.0.0.1:\(PORT)")
-    print("[voice] Native languages → Anthropic | Others → Apple STT")
+    print("[voice] Native languages → Anthropic | Hebrew → ivrit.ai | Others → Apple STT")
+    if let engine = readIvritConfig() {
+        print("[voice] ivrit.ai configured ✓ (\(ivritEngineLabel(engine)))")
+    } else {
+        print("[voice] ivrit.ai not configured — Hebrew will use Apple STT (set up via setup.sh for better quality)")
+    }
 }
 
 // MARK: - App entry

@@ -62,7 +62,7 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet websockets vosk
+"$VENV_DIR/bin/pip" install --quiet websockets vosk "ivrit[faster-whisper]"
 echo "  Done"
 
 # 3. Download Vosk model
@@ -84,6 +84,11 @@ fi
 echo "[4/5] Installing voice server..."
 cp "$SCRIPT_DIR/voice_server.py" "$INSTALL_DIR/voice_server.py"
 chmod +x "$INSTALL_DIR/voice_server.py"
+# Install ivrit local helper (used by both Linux and macOS)
+if [ -f "$SCRIPT_DIR/transcribe_ivrit_local.py" ]; then
+  cp "$SCRIPT_DIR/transcribe_ivrit_local.py" "$INSTALL_DIR/transcribe_ivrit_local.py"
+  chmod +x "$INSTALL_DIR/transcribe_ivrit_local.py"
+fi
 
 # Configure settings.json
 SETTINGS="$HOME/.claude/settings.json"
@@ -132,6 +137,105 @@ systemctl --user daemon-reload
 systemctl --user enable "$SERVICE_NAME"
 systemctl --user start "$SERVICE_NAME"
 echo "  Voice server started"
+
+# 6. Optional: ivrit.ai setup for Hebrew
+echo ""
+echo "=== Hebrew (ivrit.ai) Setup ==="
+echo ""
+echo "For high-quality Hebrew speech recognition, you can configure ivrit.ai."
+echo "Two modes available:"
+echo "  1) Local  — runs on your CPU/GPU, no internet needed (uses faster-whisper)"
+echo "  2) Cloud  — uses RunPod serverless API (requires API key, pay-per-use)"
+echo "  3) Skip   — Hebrew will use Vosk (lower quality)"
+echo ""
+read -rp "Choose mode [1=local / 2=cloud / 3=skip]: " IVRIT_MODE
+
+if [[ "$IVRIT_MODE" == "1" ]]; then
+  echo ""
+  echo "Setting up local ivrit.ai (faster-whisper)..."
+  echo ""
+  echo "Device options: cpu, cuda (NVIDIA GPU), cuda:0, cuda:1"
+  read -rp "  Device [cpu]: " IVRIT_DEVICE
+  IVRIT_DEVICE="${IVRIT_DEVICE:-cpu}"
+
+  IVRIT_COMPUTE=""
+  if [[ "$IVRIT_DEVICE" == cuda* ]]; then
+    echo "  Compute type options: float16 (recommended for GPU), int8_float16, float32"
+    read -rp "  Compute type [float16]: " IVRIT_COMPUTE
+    IVRIT_COMPUTE="${IVRIT_COMPUTE:-float16}"
+  else
+    echo "  Compute type options: float32 (default for CPU), int8 (faster, slightly less accurate)"
+    read -rp "  Compute type [float32]: " IVRIT_COMPUTE
+    IVRIT_COMPUTE="${IVRIT_COMPUTE:-float32}"
+  fi
+
+  echo ""
+  echo "  Model options:"
+  echo "    ivrit-ai/faster-whisper-v2-d4       (recommended, best accuracy)"
+  echo "    ivrit-ai/whisper-large-v3-turbo-ct2  (faster, slightly less accurate)"
+  read -rp "  Model [ivrit-ai/faster-whisper-v2-d4]: " IVRIT_MODEL
+  IVRIT_MODEL="${IVRIT_MODEL:-ivrit-ai/faster-whisper-v2-d4}"
+
+  python3 - "$IVRIT_DEVICE" "$IVRIT_COMPUTE" "$IVRIT_MODEL" << 'PYEOF'
+import json, os, sys
+device, compute_type, model = sys.argv[1], sys.argv[2], sys.argv[3]
+path = os.path.expanduser("~/.claude/settings.json")
+with open(path) as f:
+    s = json.load(f)
+s["ivritAi"] = {
+    "engine": "local",
+    "device": device,
+    "computeType": compute_type,
+    "model": model,
+}
+with open(path, "w") as f:
+    json.dump(s, f, indent=2, ensure_ascii=False)
+print(f"  ivrit.ai configured (local, {device}, {compute_type})!")
+print("  The model will be downloaded on first use from HuggingFace.")
+print("  Set language to 'he' with /config to use it.")
+PYEOF
+
+elif [[ "$IVRIT_MODE" == "2" ]]; then
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  How to get your RunPod API Key & Endpoint ID:"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "  1. Create an account at https://www.runpod.io/?ref=06octndf"
+  echo "  2. Go to Settings → API Keys → Create API Key"
+  echo "     (copy the key starting with 'rp_...')"
+  echo "  3. Go to Serverless → Endpoints → New Endpoint"
+  echo "     - Search for 'ivrit-ai' template"
+  echo "     - Or deploy from: https://www.runpod.io/console/explore/ivrit-ai-whisper"
+  echo "     - Copy the Endpoint ID from the endpoint URL"
+  echo "  4. Video guide: https://www.youtube.com/watch?v=IkqArVv_Uts"
+  echo ""
+  echo "  More info: https://www.ivrit.ai/en/api/"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+
+  read -rp "  RunPod API Key (rp_...): " IVRIT_API_KEY
+  read -rp "  RunPod Endpoint ID: " IVRIT_ENDPOINT_ID
+
+  if [ -n "$IVRIT_API_KEY" ] && [ -n "$IVRIT_ENDPOINT_ID" ]; then
+    python3 - "$IVRIT_API_KEY" "$IVRIT_ENDPOINT_ID" << 'PYEOF'
+import json, os, sys
+api_key, endpoint_id = sys.argv[1], sys.argv[2]
+path = os.path.expanduser("~/.claude/settings.json")
+with open(path) as f:
+    s = json.load(f)
+s["ivritAi"] = {"engine": "runpod", "apiKey": api_key, "endpointId": endpoint_id}
+with open(path, "w") as f:
+    json.dump(s, f, indent=2, ensure_ascii=False)
+print("  ivrit.ai configured (RunPod cloud)!")
+print("  Set language to 'he' with /config to use it.")
+PYEOF
+  else
+    echo "  Skipped — you can set this up later by re-running setup.sh"
+  fi
+else
+  echo "Skipped. You can set up ivrit.ai later by re-running setup.sh."
+fi
 
 echo ""
 echo "=== Done ==="
