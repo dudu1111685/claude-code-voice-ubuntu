@@ -92,7 +92,12 @@ func transcribe(_ pcm: Data, completion: @escaping (String) -> Void) {
 func recognize(_ rec: SFSpeechRecognizer, _ url: URL, _ completion: @escaping (String) -> Void) {
     let req = SFSpeechURLRecognitionRequest(url: url)
     req.shouldReportPartialResults = false
-    if rec.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
+    if rec.supportsOnDeviceRecognition {
+        req.requiresOnDeviceRecognition = true
+        print("[voice] Using on-device recognition")
+    } else {
+        print("[voice] Using cloud recognition (requires internet)")
+    }
 
     rec.recognitionTask(with: req) { result, _ in
         try? FileManager.default.removeItem(at: url)
