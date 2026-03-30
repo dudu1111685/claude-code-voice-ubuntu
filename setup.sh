@@ -1,10 +1,28 @@
 #!/bin/bash
 set -euo pipefail
 
-# Claude Code Voice (macOS)
-# Requirements: Xcode Command Line Tools only.
+# Claude Code Voice — cross-platform installer.
+# macOS: Swift + Apple SFSpeechRecognizer
+# Linux: Python + Vosk STT
 
 INSTALL_DIR="$HOME/.local/share/claude-code-voice"
+OS="$(uname -s)"
+
+# Linux → delegate to Linux-specific setup
+if [ "$OS" = "Linux" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+  if [ -f "$SCRIPT_DIR/scripts/setup_linux.sh" ]; then
+    exec bash "$SCRIPT_DIR/scripts/setup_linux.sh"
+  else
+    # Running via curl|bash — clone first, then run Linux setup
+    echo "Downloading claude-code-voice..."
+    rm -rf "$INSTALL_DIR"
+    git clone --depth 1 https://github.com/dudu1111685/claude-code-voice-ubuntu.git "$INSTALL_DIR" 2>/dev/null
+    exec bash "$INSTALL_DIR/scripts/setup_linux.sh"
+  fi
+fi
+
+# ── macOS setup below ─────────────────────────────────────────────
 
 # If running via curl|bash, clone the repo first
 if [ ! -f "scripts/server.swift" ]; then

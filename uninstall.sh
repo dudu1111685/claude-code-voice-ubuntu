@@ -1,6 +1,28 @@
 #!/bin/bash
 set -euo pipefail
 
+# Linux → delegate to Linux-specific uninstall
+if [ "$(uname -s)" = "Linux" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+  if [ -f "$SCRIPT_DIR/scripts/uninstall_linux.sh" ]; then
+    exec bash "$SCRIPT_DIR/scripts/uninstall_linux.sh"
+  elif [ -f "$HOME/.local/share/claude-code-voice/scripts/uninstall_linux.sh" ]; then
+    exec bash "$HOME/.local/share/claude-code-voice/scripts/uninstall_linux.sh"
+  else
+    # Inline minimal Linux uninstall
+    echo "=== Uninstalling Claude Code Voice (Linux) ==="
+    systemctl --user stop claude-code-voice 2>/dev/null || true
+    systemctl --user disable claude-code-voice 2>/dev/null || true
+    rm -f "$HOME/.config/systemd/user/claude-code-voice.service"
+    pkill -f "voice_server.py" 2>/dev/null || true
+    rm -rf "$HOME/.local/share/claude-code-voice"
+    echo "=== Uninstall complete ==="
+    exit 0
+  fi
+fi
+
+# ── macOS uninstall below ─────────────────────────────────────────
+
 echo "=== Uninstalling Claude Code Voice ==="
 echo ""
 
