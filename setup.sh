@@ -16,20 +16,20 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="$SCRIPT_DIR/scripts"
-APP="$SCRIPTS/HebrewVoice.app"
+APP="$SCRIPTS/VoiceServer.app"
 
 echo "=== Claude Code Voice ==="
 echo ""
 
-# Check Swift is available
 if ! command -v swiftc &>/dev/null; then
   echo "ERROR: Xcode Command Line Tools required."
   echo "  Install: xcode-select --install"
   exit 1
 fi
 
-# 1. Build the app
-echo "[1/2] Building..."
+# 1. Build
+echo "[1/3] Building..."
+rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 
 swiftc -O -o "$APP/Contents/MacOS/voice-server" "$SCRIPTS/server.swift" \
@@ -39,7 +39,7 @@ cat > "$APP/Contents/Info.plist" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-    <key>CFBundleIdentifier</key><string>com.claude-code-voice.server</string>
+    <key>CFBundleIdentifier</key><string>com.claude-code-voice</string>
     <key>CFBundleName</key><string>ClaudeCodeVoice</string>
     <key>CFBundleExecutable</key><string>voice-server</string>
     <key>CFBundleVersion</key><string>1.0</string>
@@ -58,11 +58,20 @@ codesign --force --sign - --entitlements /dev/stdin "$APP" << 'EOF'
     <key>com.apple.security.device.audio-input</key><true/>
 </dict></plist>
 EOF
+echo "  Done"
 
-echo "  Built HebrewVoice.app"
+# 2. Grant Speech Recognition permission
+echo "[2/3] Requesting Speech Recognition permission..."
+echo "  >>> If a dialog appears, click ALLOW <<<"
+open -W "$APP" &
+OPEN_PID=$!
+sleep 10
+kill "$OPEN_PID" 2>/dev/null || true
+pkill -f voice-server 2>/dev/null || true
+sleep 1
 
-# 2. Configure settings + install launch agent
-echo "[2/2] Configuring..."
+# 3. Configure settings + install launch agent
+echo "[3/3] Configuring..."
 
 SETTINGS="$HOME/.claude/settings.json"
 if [ ! -f "$SETTINGS" ]; then
@@ -81,8 +90,7 @@ with open(path, "w") as f:
 print("  Updated settings.json")
 PYEOF
 
-# Install launch agent
-PLIST="$HOME/Library/LaunchAgents/com.claude-code-voice.server.plist"
+PLIST="$HOME/Library/LaunchAgents/com.claude-code-voice.plist"
 launchctl unload "$PLIST" 2>/dev/null || true
 mkdir -p "$HOME/Library/LaunchAgents"
 
@@ -90,26 +98,23 @@ cat > "$PLIST" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-    <key>Label</key><string>com.claude-code-voice.server</string>
+    <key>Label</key><string>com.claude-code-voice</string>
     <key>ProgramArguments</key><array>
         <string>$APP/Contents/MacOS/voice-server</string>
     </array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
-    <key>StandardOutPath</key><string>/tmp/hebrew-voice.log</string>
-    <key>StandardErrorPath</key><string>/tmp/hebrew-voice.log</string>
+    <key>StandardOutPath</key><string>/tmp/claude-code-voice.log</string>
+    <key>StandardErrorPath</key><string>/tmp/claude-code-voice.log</string>
 </dict></plist>
 EOF
 
 launchctl load "$PLIST"
-echo "  Voice server installed and started"
+echo "  Voice server started"
 
 echo ""
 echo "=== Done ==="
-echo ""
 echo "Restart Claude Code, enable /voice, and speak."
-echo "Switch language with /config. Native languages → Anthropic, others → Apple STT."
-echo ""
-echo "First run: macOS will ask for Speech Recognition permission — click Allow."
+echo "Switch language with /config."
 echo ""
 echo "Uninstall: curl -fsSL https://raw.githubusercontent.com/eladcandroid/claude-code-voice/main/uninstall.sh | bash"

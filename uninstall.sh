@@ -4,20 +4,18 @@ set -euo pipefail
 echo "=== Uninstalling Claude Code Voice ==="
 echo ""
 
-# 1. Stop and remove launch agent (check both old and new names)
-for name in com.claude-code-voice.server com.claude-code-voice.server; do
+# 1. Stop and remove launch agents (current + legacy names)
+for name in com.claude-code-voice com.claude-code-voice.server com.hebrew-voice.server; do
   PLIST="$HOME/Library/LaunchAgents/$name.plist"
   if [ -f "$PLIST" ]; then
     launchctl unload "$PLIST" 2>/dev/null || true
     rm -f "$PLIST"
-    echo "[✓] Removed $name launch agent"
+    echo "[✓] Removed $name"
   fi
 done
 
 # 2. Kill any running voice server
 pkill -f "voice-server" 2>/dev/null || true
-pkill -f "hebrew-voice" 2>/dev/null || true
-pkill -f "HebrewVoice" 2>/dev/null || true
 echo "[✓] Stopped voice server"
 
 # 3. Remove VOICE_STREAM_BASE_URL from settings.json
@@ -38,8 +36,9 @@ else
 fi
 
 # 4. Reset Speech Recognition permission
-tccutil reset SpeechRecognition com.claude-code-voice.server 2>/dev/null || true
-tccutil reset SpeechRecognition com.claude-code-voice.server 2>/dev/null || true
+for bid in com.claude-code-voice com.claude-code-voice.server com.hebrew-voice.server; do
+  tccutil reset SpeechRecognition "$bid" 2>/dev/null || true
+done
 echo "[✓] Reset Speech Recognition permission"
 
 # 5. Remove install directories

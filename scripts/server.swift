@@ -236,6 +236,8 @@ class LocalSession {
 
 // MARK: - Server
 
+var activeSessions: [ObjectIdentifier: AnyObject] = [:]
+
 func startServer() {
     let params = NWParameters.tcp
     let ws = NWProtocolWebSocket.Options()
@@ -252,12 +254,19 @@ func startServer() {
 
         if isNativeLanguage(raw), let token = readOAuthToken() {
             print("[voice] Connected (\(code) → Anthropic)")
-            _ = ProxySession(conn, lang: code, token: token)
+            let session = ProxySession(conn, lang: code, token: token)
+            activeSessions[ObjectIdentifier(session)] = session
         } else {
             let locale = appleLocale(raw)
             print("[voice] Connected (\(locale) → Apple STT)")
             let session = LocalSession(locale: locale)
+            activeSessions[ObjectIdentifier(session)] = session
             session.receive(conn)
+        }
+
+        conn.stateUpdateHandler = { state in
+            if case .cancelled = state { activeSessions.removeAll() }
+            if case .failed = state { activeSessions.removeAll() }
         }
     }
     listener.start(queue: .main)
