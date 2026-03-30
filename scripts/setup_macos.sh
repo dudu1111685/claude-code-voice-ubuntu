@@ -1,43 +1,35 @@
 #!/bin/bash
 set -euo pipefail
 
-# Claude Code Voice — Linux (Ubuntu/Debian) installer
-# Soniox streaming STT (primary) + Vosk fallback
+# Claude Code Voice — macOS installer
+# Python + Soniox streaming STT (no Swift, no Xcode required)
 
 INSTALL_DIR="$HOME/.local/share/claude-code-voice"
-MODELS_DIR="$INSTALL_DIR/models"
 VENV_DIR="$INSTALL_DIR/venv"
-SERVICE_NAME="claude-code-voice"
-SERVICE_DIR="$HOME/.config/systemd/user"
-SERVICE_FILE="$SERVICE_DIR/$SERVICE_NAME.service"
+MODELS_DIR="$INSTALL_DIR/models"
+PLIST_NAME="com.claude-code-voice"
+PLIST="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
 
-# Vosk fallback model (small English, ~40MB)
+# Vosk fallback model
 VOSK_MODEL_URL="https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 VOSK_MODEL_NAME="vosk-model-small-en-us-0.15"
 
 # Resolve script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 if [ ! -f "$SCRIPT_DIR/voice_server.py" ]; then
-  if [ ! -f "scripts/voice_server.py" ]; then
-    echo "Downloading claude-code-voice..."
-    rm -rf "$INSTALL_DIR"
-    git clone --depth 1 https://github.com/dudu1111685/claude-code-voice-ubuntu.git "$INSTALL_DIR" 2>/dev/null
-    SCRIPT_DIR="$INSTALL_DIR/scripts"
-  else
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)/scripts"
-    [ -f "$SCRIPT_DIR/voice_server.py" ] || SCRIPT_DIR="$(pwd)/scripts"
-  fi
+  SCRIPT_DIR="$INSTALL_DIR/scripts"
 fi
 
-echo "=== Claude Code Voice (Linux) ==="
+echo "=== Claude Code Voice (macOS) ==="
 echo ""
 
-# 1. Check system dependencies
+# 1. Check Python
 echo "[1/5] Checking dependencies..."
 
 if ! command -v python3 &>/dev/null; then
-  echo "  Installing python3..."
-  sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-pip python3-venv
+  echo "  ERROR: Python 3 not found."
+  echo "  Install: brew install python@3.12"
+  exit 1
 fi
 
 PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
@@ -46,23 +38,13 @@ PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
 
 if [ "$PYTHON_MAJOR" -lt 3 ] || { [ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -lt 10 ]; }; then
   echo "  ERROR: Python >= 3.10 required (found $PYTHON_VERSION)"
-  echo "  Install: sudo apt-get install python3.12"
+  echo "  Install: brew install python@3.12"
   exit 1
-fi
-
-if ! python3 -c "import venv" 2>/dev/null; then
-  echo "  Installing python3-venv..."
-  sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv
-fi
-
-if ! command -v unzip &>/dev/null; then
-  echo "  Installing unzip..."
-  sudo apt-get update -qq && sudo apt-get install -y -qq unzip
 fi
 
 echo "  Done (Python $PYTHON_VERSION)"
 
-# 2. Create venv and install Python packages
+# 2. Create venv and install packages
 echo "[2/5] Setting up Python environment..."
 mkdir -p "$INSTALL_DIR"
 
@@ -112,7 +94,7 @@ with open(path, "w") as f:
 print("  Updated settings.json")
 PYEOF
 
-# 5. Soniox API key setup
+# 5. Soniox API key
 echo ""
 echo "=== Soniox API Key ==="
 echo ""
@@ -156,34 +138,32 @@ PYEOF
   fi
 fi
 
-# 6. Create and start systemd service
+# 6. Install launchd service
 echo ""
-echo "[5/5] Setting up systemd service..."
+echo "[5/5] Setting up launchd service..."
 
-systemctl --user stop "$SERVICE_NAME" 2>/dev/null || true
-systemctl --user disable "$SERVICE_NAME" 2>/dev/null || true
+# Stop existing service
+launchctl unload "$PLIST" 2>/dev/null || true
 
-mkdir -p "$SERVICE_DIR"
+mkdir -p "$HOME/Library/LaunchAgents"
 
-cat > "$SERVICE_FILE" << EOF
-[Unit]
-Description=Claude Code Voice Server
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=$VENV_DIR/bin/python3 $INSTALL_DIR/voice_server.py
-Restart=always
-RestartSec=3
-Environment=HOME=$HOME
-
-[Install]
-WantedBy=default.target
+cat > "$PLIST" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>Label</key><string>$PLIST_NAME</string>
+    <key>ProgramArguments</key><array>
+        <string>$VENV_DIR/bin/python3</string>
+        <string>$INSTALL_DIR/voice_server.py</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>/tmp/claude-code-voice.log</string>
+    <key>StandardErrorPath</key><string>/tmp/claude-code-voice.log</string>
+</dict></plist>
 EOF
 
-systemctl --user daemon-reload
-systemctl --user enable "$SERVICE_NAME"
-systemctl --user start "$SERVICE_NAME"
+launchctl load "$PLIST"
 echo "  Voice server started"
 
 echo ""
@@ -191,7 +171,6 @@ echo "=== Done ==="
 echo "Restart Claude Code, enable /voice, and speak."
 echo "Switch language with /config."
 echo ""
-echo "Check status:  systemctl --user status $SERVICE_NAME"
-echo "View logs:     journalctl --user -u $SERVICE_NAME -f"
+echo "Logs: tail -f /tmp/claude-code-voice.log"
 echo ""
 echo "Uninstall: curl -fsSL https://raw.githubusercontent.com/dudu1111685/claude-code-voice-ubuntu/main/uninstall.sh | bash"
