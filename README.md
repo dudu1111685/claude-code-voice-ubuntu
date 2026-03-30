@@ -25,6 +25,16 @@ After install, restart Claude Code:
 
 > **First run:** macOS will prompt for Speech Recognition permission — click **Allow**.
 
+## Switching languages
+
+The server reads `language` from `~/.claude/settings.json` on every recording. To switch:
+
+1. Type `/config` in Claude Code
+2. Change the language (e.g., `he`, `en`, `ja`, `es`, ...)
+3. Next `/voice` recording uses the new language
+
+Supports all languages available in Apple's `SFSpeechRecognizer`: Hebrew, English, Spanish, French, German, Japanese, Korean, Portuguese, Italian, Russian, Chinese, Arabic, Hindi, Turkish, Dutch, Polish, Ukrainian, Greek, Czech, Danish, Swedish, Norwegian, and more.
+
 ## How it works
 
 Claude Code has an undocumented `VOICE_STREAM_BASE_URL` env var that redirects its voice WebSocket. This project runs a native macOS app on `localhost:19876` that receives the audio stream and transcribes it using Apple's on-device `SFSpeechRecognizer` for Hebrew.
