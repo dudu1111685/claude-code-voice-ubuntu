@@ -13,7 +13,9 @@ import logging
 
 try:
     import websockets
-    import websockets.client
+    import websockets.exceptions
+    from websockets.asyncio.client import connect as ws_connect
+    from websockets.asyncio.server import serve as ws_serve
 except ImportError:
     print("[voice] ERROR: 'websockets' package not found. Run: pip install websockets")
     raise SystemExit(1)
@@ -238,8 +240,9 @@ def transcribe_vosk(pcm: bytes, lang: str) -> str:
 
 # ── Proxy session (native languages → Anthropic) ─────────────────
 
-async def proxy_session(ws_client, lang: str, token: str):
-    """Proxy WebSocket traffic between Claude Code and Anthropic's STT server."""
+async def proxy_session(ws_client, lang: str, token: str) -> bool:
+    """Proxy WebSocket traffic between Claude Code and Anthropic's STT server.
+    Returns True if proxy succeeded, False if it failed (caller should fall back)."""
     params = (
         f"encoding=linear16&sample_rate=16000&channels=1"
         f"&endpointing_ms=300&utterance_end_ms=1000&language={lang}"
@@ -253,7 +256,7 @@ async def proxy_session(ws_client, lang: str, token: str):
     log.info(f"Proxying to Anthropic ({lang})")
 
     try:
-        async with websockets.client.connect(url, additional_headers=headers) as upstream:
+        async with ws_connect(url, additional_headers=headers, open_timeout=5) as upstream:
             async def client_to_upstream():
                 try:
                     async for msg in ws_client:
@@ -279,8 +282,10 @@ async def proxy_session(ws_client, lang: str, token: str):
                 upstream_to_client(),
                 return_exceptions=True,
             )
+            return True
     except Exception as e:
         log.error(f"Proxy error: {e}")
+        return False
 
 
 # ── Local session (unsupported languages → Vosk) ─────────────────
@@ -340,8 +345,10 @@ async def handle_connection(ws_client):
         token = read_oauth_token()
         if token:
             log.info(f"Connected ({code} → Anthropic)")
-            await proxy_session(ws_client, code, token)
-            return
+            ok = await proxy_session(ws_client, code, token)
+            if ok:
+                return
+            log.info(f"Proxy failed, falling back to local STT")
 
     # Fall through to local STT
     await local_session(ws_client, raw)
@@ -353,7 +360,7 @@ async def main():
     log.info(f"Voice server on ws://127.0.0.1:{PORT}")
     log.info("Native languages → Anthropic | Others → Vosk STT")
 
-    async with websockets.serve(handle_connection, "127.0.0.1", PORT):
+    async with ws_serve(handle_connection, "127.0.0.1", PORT):
         await asyncio.Future()  # Run forever
 
 
